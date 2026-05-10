@@ -94,6 +94,45 @@ button {
   line-height: 1.5;
 }
 
+.panel-contact {
+  display: grid;
+  gap: 4px;
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid rgba(182, 64, 40, 0.14);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.64);
+}
+
+.panel-contact__label,
+.panel-contact__name,
+.panel-contact__link {
+  margin: 0;
+}
+
+.panel-contact__label {
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.panel-contact__name {
+  color: var(--app-ink);
+  font-weight: 600;
+}
+
+.panel-contact__link {
+  color: var(--accent-strong);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.panel-contact__link:hover {
+  text-decoration: underline;
+}
+
 .panel-section {
   margin-top: 24px;
 }
@@ -332,30 +371,85 @@ button {
 
 .worksheet-row {
   display: grid;
-  gap: 3px;
+  gap: 4px;
 }
 
 .worksheet-row__meta {
   display: flex;
-  gap: 14px;
-  align-items: end;
-  min-height: 1.45rem;
+  gap: 12px;
+  align-items: flex-end;
+  min-height: 0;
+  min-width: 0;
   font-family: "Avenir Next", "Helvetica Neue", sans-serif;
 }
 
-.worksheet-row__pinyin,
-.worksheet-row__word {
+.worksheet-row__pinyin {
   margin: 0;
 }
 
 .worksheet-row__pinyin {
-  min-width: 3.4rem;
+  flex: 0 0 auto;
   font-size: 0.95rem;
   line-height: 1;
   color: #3d3d3d;
+  white-space: nowrap;
 }
 
-.worksheet-row__word {
+.worksheet-row__stroke-guide {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  gap: 8px 12px;
+  align-items: flex-end;
+  min-height: 1.35rem;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+}
+
+.stroke-guide__character {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  align-items: flex-end;
+  max-width: 100%;
+  flex: 0 0 auto;
+}
+
+.stroke-guide__animation,
+.stroke-guide__step,
+.stroke-guide__fallback {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+}
+
+.stroke-guide__animation {
+  width: 28px;
+  height: 28px;
+  padding: 2px;
+  border-radius: 8px;
+  background: rgba(193, 95, 52, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(193, 95, 52, 0.18);
+}
+
+.stroke-guide__svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.stroke-guide__svg--animation {
+  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.08));
+}
+
+.stroke-guide__svg path {
+  fill: #111111;
+}
+
+.stroke-guide__fallback {
   font-family: "Songti SC", "STSong", "Noto Serif CJK SC", serif;
   font-size: 1.15rem;
   line-height: 1;
@@ -504,8 +598,21 @@ button {
     gap: 10px;
   }
 
-  .worksheet-row__pinyin {
-    min-width: 0;
+  .worksheet-row__stroke-guide {
+    gap: 6px 10px;
+  }
+
+  .stroke-guide__animation,
+  .stroke-guide__step,
+  .stroke-guide__fallback {
+    width: 18px;
+    height: 18px;
+  }
+
+  .stroke-guide__animation {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
   }
 }
 
@@ -553,6 +660,10 @@ button {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
+
+  .stroke-guide__animation {
+    display: none;
+  }
 }
 
 .preview--exporting .worksheet-page {
@@ -582,4 +693,8 @@ button {
 .preview--exporting .practice-cell__guide--horizontal,
 .preview--exporting .practice-cell__guide--diagonal {
   height: 1.4px;
+}
+
+.preview--exporting .stroke-guide__animation {
+  display: none;
 }

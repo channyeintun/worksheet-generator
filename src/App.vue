@@ -1,11 +1,14 @@
 <script setup>
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowReactive, watch } from "vue";
 import { pinyin } from "pinyin-pro";
 import defaultWordsText from "../words.txt?raw";
 
+const strokeDataBaseUrl = "https://cdn.jsdelivr.net/npm/hanzi-writer-data@2.0.1";
+const strokeAnimationIntervalMs = 700;
+
 const defaults = {
   title: "Hanyu-1 Hanzi Writing",
-  footerText: "Teacher: __________",
+  footerText: "",
   rowsPerPage: 10,
   totalBoxes: 12,
   traceCopies: 7,
@@ -25,6 +28,25 @@ const wordSearch = ref("");
 const previewRef = ref(null);
 const isExportingPdf = ref(false);
 const exportError = ref("");
+const strokeDataByCharacter = shallowReactive({});
+const pendingStrokeLoads = new Map();
+const strokeAnimationTick = ref(0);
+
+let strokeAnimationTimer = 0;
+
+onMounted(() => {
+  strokeAnimationTimer = window.setInterval(() => {
+    if (isExportingPdf.value) {
+      return;
+    }
+
+    strokeAnimationTick.value += 1;
+  }, strokeAnimationIntervalMs);
+});
+
+onBeforeUnmount(() => {
+  window.clearInterval(strokeAnimationTimer);
+});
 
 const normalizedRowsPerPage = computed(() =>
   clampNumber(rowsPerPage.value, 4, 14, defaults.rowsPerPage),
@@ -47,6 +69,14 @@ const worksheetTitleDisplay = computed(() => {
 const footerTextDisplay = computed(() => footerText.value.trim());
 
 const selectedWords = computed(() => parseWords(selectedWordsText.value));
+
+watch(
+  selectedWords,
+  (words) => {
+    void preloadStrokeData(words);
+  },
+  { immediate: true },
+);
 
 const selectedWordSet = computed(() => new Set(selectedWords.value));
 
@@ -89,6 +119,67 @@ function cleanWords() {
 
 function clearWords() {
   selectedWordsText.value = "";
+}
+
+async function preloadStrokeData(words) {
+  const loadTasks = [];
+
+  for (const character of uniqueCharacters(words)) {
+    loadTasks.push(loadStrokeData(character));
+  }
+
+  await Promise.allSettled(loadTasks);
+}
+
+function uniqueCharacters(words) {
+  const characters = [];
+  const seenCharacters = new Set();
+
+  for (const word of words) {
+    for (const character of Array.from(word)) {
+      if (!character.trim() || seenCharacters.has(character)) {
+        continue;
+      }
+
+      seenCharacters.add(character);
+      characters.push(character);
+    }
+  }
+
+  return characters;
+}
+
+function loadStrokeData(character) {
+  if (character in strokeDataByCharacter) {
+    return Promise.resolve(strokeDataByCharacter[character]);
+  }
+
+  if (pendingStrokeLoads.has(character)) {
+    return pendingStrokeLoads.get(character);
+  }
+
+  const request = fetch(`${strokeDataBaseUrl}/${encodeURIComponent(character)}.json`)
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error(`Unexpected response ${response.status}`);
+      }
+
+      const strokeData = await response.json();
+
+      strokeDataByCharacter[character] = buildCharacterStrokeGuide(strokeData);
+      return strokeDataByCharacter[character];
+    })
+    .catch(() => {
+      strokeDataByCharacter[character] = null;
+      return null;
+    })
+    .finally(() => {
+      pendingStrokeLoads.delete(character);
+    });
+
+  pendingStrokeLoads.set(character, request);
+
+  return request;
 }
 
 function toggleWord(word) {
@@ -266,6 +357,49 @@ function buildFilename(value) {
 
   return sanitizedValue || "chinese-worksheet";
 }
+
+function buildCharacterStrokeGuide(strokeData) {
+  const strokes = Array.isArray(strokeData?.strokes) ? strokeData.strokes : [];
+
+  return {
+    steps: strokes.map((_, strokeIndex) => strokes.slice(0, strokeIndex + 1)),
+  };
+}
+
+function strokeGuide(word) {
+  return Array.from(word).map((character) => {
+    const characterGuide = strokeDataByCharacter[character];
+
+    return {
+      character,
+      steps: characterGuide?.steps ?? [],
+    };
+  });
+}
+
+function animatedStrokeStep(word, characterIndex, steps) {
+  if (!steps.length) {
+    return [];
+  }
+
+  if (steps.length === 1) {
+    return steps[0];
+  }
+
+  const stepIndex = (strokeAnimationTick.value + strokeAnimationOffset(word, characterIndex)) % steps.length;
+
+  return steps[stepIndex];
+}
+
+function strokeAnimationOffset(word, characterIndex) {
+  let total = characterIndex;
+
+  for (const character of Array.from(word)) {
+    total += character.codePointAt(0) ?? 0;
+  }
+
+  return total;
+}
 </script>
 
 <template>
@@ -277,6 +411,13 @@ function buildFilename(value) {
         <p class="panel-copy">
           Pick words from the source list, tune the page layout, and download a ready-made PDF.
         </p>
+        <div class="panel-contact" aria-label="Contact information">
+          <p class="panel-contact__label">Contact</p>
+          <p class="panel-contact__name">Tr. Phoo Pwint Kyaw</p>
+          <a class="panel-contact__link" href="mailto:phoopwintkyaw49@gmail.com">
+            phoopwintkyaw49@gmail.com
+          </a>
+        </div>
       </div>
 
       <section class="panel-section">
@@ -296,7 +437,7 @@ function buildFilename(value) {
           v-model="footerText"
           class="text-input"
           type="text"
-          placeholder="Teacher, class, notes"
+          placeholder="Enter footer text"
         />
       </section>
 
@@ -399,9 +540,6 @@ function buildFilename(value) {
           <p v-if="exportError" class="export-error">{{ exportError }}</p>
         </div>
         <div class="button-row">
-          <button type="button" class="secondary-button" @click="normalizeLayout">
-            Normalize layout
-          </button>
           <button
             type="button"
             class="primary-button"
@@ -446,7 +584,60 @@ function buildFilename(value) {
             >
               <div class="worksheet-row__meta">
                 <p v-if="showPinyin" class="worksheet-row__pinyin">{{ safePinyin(word) }}</p>
-                <p class="worksheet-row__word">{{ word }}</p>
+                <div class="worksheet-row__stroke-guide" :aria-label="`Stroke order for ${word}`">
+                  <div
+                    v-for="(characterGuide, characterIndex) in strokeGuide(word)"
+                    :key="`${word}-${characterIndex}-${characterGuide.character}`"
+                    class="stroke-guide__character"
+                  >
+                    <span
+                      v-if="characterGuide.steps.length && !isExportingPdf"
+                      class="stroke-guide__animation"
+                      aria-hidden="true"
+                    >
+                      <svg
+                        class="stroke-guide__svg stroke-guide__svg--animation"
+                        viewBox="0 0 1024 1024"
+                        focusable="false"
+                      >
+                        <g transform="translate(0 900) scale(1 -1)">
+                          <path
+                            v-for="(strokePath, strokeIndex) in animatedStrokeStep(
+                              word,
+                              characterIndex,
+                              characterGuide.steps,
+                            )"
+                            :key="`${word}-${characterIndex}-animated-${strokeIndex}`"
+                            :d="strokePath"
+                          />
+                        </g>
+                      </svg>
+                    </span>
+                    <template v-if="characterGuide.steps.length">
+                      <span
+                        v-for="(step, stepIndex) in characterGuide.steps"
+                        :key="`${word}-${characterIndex}-${stepIndex}`"
+                        class="stroke-guide__step"
+                        aria-hidden="true"
+                      >
+                        <svg
+                          class="stroke-guide__svg"
+                          viewBox="0 0 1024 1024"
+                          focusable="false"
+                        >
+                          <g transform="translate(0 900) scale(1 -1)">
+                            <path
+                              v-for="(strokePath, strokeIndex) in step"
+                              :key="`${word}-${characterIndex}-${stepIndex}-${strokeIndex}`"
+                              :d="strokePath"
+                            />
+                          </g>
+                        </svg>
+                      </span>
+                    </template>
+                    <span v-else class="stroke-guide__fallback">{{ characterGuide.character }}</span>
+                  </div>
+                </div>
               </div>
 
               <div class="practice-strip">
