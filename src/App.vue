@@ -28,6 +28,7 @@ const wordSearch = ref("");
 const previewRef = ref(null);
 const isExportingPdf = ref(false);
 const exportError = ref("");
+const animationWord = ref("");
 const strokeDataByCharacter = shallowReactive({});
 const pendingStrokeLoads = new Map();
 const strokeAnimationTick = ref(0);
@@ -42,10 +43,14 @@ onMounted(() => {
 
     strokeAnimationTick.value += 1;
   }, strokeAnimationIntervalMs);
+
+  syncAnimationWordFromUrl();
+  window.addEventListener("popstate", syncAnimationWordFromUrl);
 });
 
 onBeforeUnmount(() => {
   window.clearInterval(strokeAnimationTimer);
+  window.removeEventListener("popstate", syncAnimationWordFromUrl);
 });
 
 const normalizedRowsPerPage = computed(() =>
@@ -69,11 +74,25 @@ const worksheetTitleDisplay = computed(() => {
 const footerTextDisplay = computed(() => footerText.value.trim());
 
 const selectedWords = computed(() => parseWords(selectedWordsText.value));
+const animationWordPinyin = computed(() => (animationWord.value ? safePinyin(animationWord.value) : ""));
+const animationStrokeGuide = computed(() => strokeGuide(animationWord.value));
 
 watch(
   selectedWords,
   (words) => {
     void preloadStrokeData(words);
+  },
+  { immediate: true },
+);
+
+watch(
+  animationWord,
+  (word) => {
+    if (!word) {
+      return;
+    }
+
+    void preloadStrokeData([word]);
   },
   { immediate: true },
 );
@@ -107,6 +126,35 @@ function normalizeLayout() {
   rowsPerPage.value = String(normalizedRowsPerPage.value);
   totalBoxes.value = String(normalizedTotalBoxes.value);
   traceCopies.value = String(normalizedTraceCopies.value);
+}
+
+function syncAnimationWordFromUrl() {
+  animationWord.value = getWordParamFromUrl();
+}
+
+function getWordParamFromUrl() {
+  const searchParams = new URLSearchParams(window.location.search);
+  const [wordFromUrl = ""] = parseWords(searchParams.get("word") ?? "");
+
+  return wordFromUrl;
+}
+
+function updateAnimationWord(value) {
+  const [nextWord = ""] = parseWords(value);
+  const url = new URL(window.location.href);
+
+  if (nextWord) {
+    url.searchParams.set("word", nextWord);
+  } else {
+    url.searchParams.delete("word");
+  }
+
+  window.history.replaceState({}, "", url);
+  animationWord.value = nextWord;
+}
+
+function clearAnimationWord() {
+  updateAnimationWord("");
 }
 
 function useAllWords() {
@@ -533,6 +581,83 @@ function strokeAnimationOffset(word, characterIndex) {
     </aside>
 
     <main class="workspace">
+      <section class="word-animation-panel">
+        <div class="word-animation-panel__header">
+          <div>
+            <p class="toolbar-kicker">Word animation</p>
+            <p class="word-animation-panel__copy">
+              Type a word here or open the page with a `word` URL parameter to preview stroke order.
+            </p>
+          </div>
+          <div class="word-animation-panel__controls">
+            <input
+              class="text-input word-animation-panel__input"
+              type="text"
+              :value="animationWord"
+              placeholder="Enter a word to animate"
+              @input="updateAnimationWord($event.target.value)"
+            />
+            <button
+              v-if="animationWord"
+              type="button"
+              class="secondary-button"
+              @click="clearAnimationWord"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <div class="word-animation-panel__preview" :class="{ 'is-empty': !animationWord }">
+          <template v-if="animationWord">
+            <div class="word-animation-panel__summary">
+              <h2 class="word-animation-panel__word">{{ animationWord }}</h2>
+              <p v-if="animationWordPinyin" class="word-animation-panel__pinyin">
+                {{ animationWordPinyin }}
+              </p>
+            </div>
+
+            <div class="word-animation-panel__body">
+              <article
+                v-for="(characterGuide, characterIndex) in animationStrokeGuide"
+                :key="`animation-${animationWord}-${characterIndex}-${characterGuide.character}`"
+                class="word-animation-card"
+              >
+                <div class="word-animation-card__header">
+                  <p class="word-animation-card__character">{{ characterGuide.character }}</p>
+                  <p class="word-animation-card__count">
+                    {{ characterGuide.steps.length ? `${characterGuide.steps.length} strokes` : "Loading..." }}
+                  </p>
+                </div>
+
+                <div class="word-animation-card__canvas" aria-hidden="true">
+                  <svg class="word-animation-card__svg" viewBox="0 0 1024 1024" focusable="false">
+                    <g transform="translate(0 900) scale(1 -1)">
+                      <path
+                        v-for="(strokePath, strokeIndex) in animatedStrokeStep(
+                          animationWord,
+                          characterIndex,
+                          characterGuide.steps,
+                        )"
+                        :key="`animation-${animationWord}-${characterIndex}-${strokeIndex}`"
+                        :d="strokePath"
+                      />
+                    </g>
+                  </svg>
+                  <span v-if="!characterGuide.steps.length" class="word-animation-card__fallback">
+                    {{ characterGuide.character }}
+                  </span>
+                </div>
+              </article>
+            </div>
+          </template>
+
+          <p v-else class="word-animation-panel__empty">
+            Enter a word above, or open this page with `?word=你好` to show its writing animation.
+          </p>
+        </div>
+      </section>
+
       <div class="workspace-toolbar">
         <div>
           <p class="toolbar-kicker">Preview</p>
