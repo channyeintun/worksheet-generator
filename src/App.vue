@@ -10,6 +10,7 @@ import defaultWordsText from "../words.txt?raw";
 const strokeDataBaseUrl = "https://cdn.jsdelivr.net/npm/hanzi-writer-data@2.0.1";
 const strokeAnimationIntervalMs = 700;
 const wordAnimationLoopDelayMs = 600;
+const mobileAnimationModalBreakpointPx = 720;
 
 const defaults = {
   title: "Hanyu-1 Hanzi Writing",
@@ -34,6 +35,10 @@ const previewRef = ref(null);
 const isExportingPdf = ref(false);
 const exportError = ref("");
 const animationWord = ref("");
+const urlDrivenAnimationWord = ref("");
+const isMobileViewport = ref(false);
+const isAnimationModalVisible = ref(false);
+const dismissedAnimationModalWord = ref("");
 const strokeDataByCharacter = shallowReactive({});
 const pendingStrokeLoads = new Map();
 const strokeAnimationTick = ref(0);
@@ -43,8 +48,12 @@ const animationWriters = new Map();
 let strokeAnimationTimer = 0;
 let animationRenderToken = 0;
 let animationLoopTimeout = 0;
+let mobileViewportQuery = null;
 
 onMounted(() => {
+  mobileViewportQuery = window.matchMedia(`(max-width: ${mobileAnimationModalBreakpointPx}px)`);
+  syncMobileViewport(mobileViewportQuery);
+
   strokeAnimationTimer = window.setInterval(() => {
     if (isExportingPdf.value) {
       return;
@@ -54,11 +63,16 @@ onMounted(() => {
   }, strokeAnimationIntervalMs);
 
   syncAnimationWordFromUrl();
+  window.addEventListener("keydown", handleWindowKeydown);
+  mobileViewportQuery.addEventListener("change", syncMobileViewport);
   window.addEventListener("popstate", syncAnimationWordFromUrl);
 });
 
 onBeforeUnmount(() => {
   window.clearInterval(strokeAnimationTimer);
+  document.body.style.overflow = "";
+  window.removeEventListener("keydown", handleWindowKeydown);
+  mobileViewportQuery?.removeEventListener("change", syncMobileViewport);
   window.removeEventListener("popstate", syncAnimationWordFromUrl);
   destroyAnimationWriters();
 });
@@ -86,6 +100,9 @@ const footerTextDisplay = computed(() => footerText.value.trim());
 const selectedWords = computed(() => parseWords(selectedWordsText.value));
 const animationWordPinyin = computed(() => (animationWord.value ? safePinyin(animationWord.value) : ""));
 const animationStrokeGuide = computed(() => strokeGuide(animationWord.value));
+const shouldAutoShowAnimationModal = computed(
+  () => isMobileViewport.value && Boolean(animationWord.value) && Boolean(urlDrivenAnimationWord.value),
+);
 
 watch(
   selectedWords,
@@ -124,6 +141,26 @@ watch(
   { immediate: true },
 );
 
+watch(
+  shouldAutoShowAnimationModal,
+  (shouldShow) => {
+    if (!shouldShow) {
+      dismissedAnimationModalWord.value = "";
+      isAnimationModalVisible.value = false;
+      return;
+    }
+
+    if (dismissedAnimationModalWord.value !== urlDrivenAnimationWord.value) {
+      isAnimationModalVisible.value = true;
+    }
+  },
+  { immediate: true },
+);
+
+watch(isAnimationModalVisible, (isVisible) => {
+  document.body.style.overflow = isVisible ? "hidden" : "";
+});
+
 const selectedWordSet = computed(() => new Set(selectedWords.value));
 
 const visibleWords = computed(() => {
@@ -155,8 +192,15 @@ function normalizeLayout() {
   traceCopies.value = String(normalizedTraceCopies.value);
 }
 
+function syncMobileViewport(event) {
+  isMobileViewport.value = event.matches;
+}
+
 function syncAnimationWordFromUrl() {
-  animationWord.value = getWordParamFromUrl();
+  const nextWord = getWordParamFromUrl();
+
+  animationWord.value = nextWord;
+  urlDrivenAnimationWord.value = nextWord;
 }
 
 function getWordParamFromUrl() {
@@ -170,6 +214,9 @@ function updateAnimationWord(value) {
   const [nextWord = ""] = parseWords(value);
   const url = new URL(window.location.href);
 
+  urlDrivenAnimationWord.value = "";
+  dismissedAnimationModalWord.value = "";
+
   if (nextWord) {
     url.searchParams.set("word", nextWord);
   } else {
@@ -182,6 +229,17 @@ function updateAnimationWord(value) {
 
 function clearAnimationWord() {
   updateAnimationWord("");
+}
+
+function closeAnimationModal() {
+  dismissedAnimationModalWord.value = urlDrivenAnimationWord.value;
+  isAnimationModalVisible.value = false;
+}
+
+function handleWindowKeydown(event) {
+  if (event.key === "Escape" && isAnimationModalVisible.value) {
+    closeAnimationModal();
+  }
 }
 
 function useAllWords() {
@@ -772,7 +830,19 @@ function strokeAnimationOffset(word, characterIndex) {
     </aside>
 
     <main class="workspace">
-      <section class="word-animation-panel">
+      <div
+        v-if="isAnimationModalVisible"
+        class="animation-modal-backdrop"
+        aria-hidden="true"
+        @click="closeAnimationModal"
+      ></div>
+
+      <section
+        class="word-animation-panel"
+        :class="{ 'word-animation-panel--modal': isAnimationModalVisible }"
+        :aria-modal="isAnimationModalVisible ? 'true' : undefined"
+        :role="isAnimationModalVisible ? 'dialog' : undefined"
+      >
         <div class="word-animation-panel__header">
           <div>
             <p class="toolbar-kicker">Word animation</p>
@@ -795,6 +865,14 @@ function strokeAnimationOffset(word, characterIndex) {
               @click="clearAnimationWord"
             >
               Clear
+            </button>
+            <button
+              v-if="isAnimationModalVisible"
+              type="button"
+              class="secondary-button"
+              @click="closeAnimationModal"
+            >
+              Close
             </button>
           </div>
         </div>
