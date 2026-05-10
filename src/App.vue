@@ -1,10 +1,12 @@
 <script setup>
+import HanziWriter from "hanzi-writer";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowReactive, watch } from "vue";
 import { pinyin } from "pinyin-pro";
 import defaultWordsText from "../words.txt?raw";
 
 const strokeDataBaseUrl = "https://cdn.jsdelivr.net/npm/hanzi-writer-data@2.0.1";
 const strokeAnimationIntervalMs = 700;
+const wordAnimationLoopDelayMs = 600;
 
 const defaults = {
   title: "Hanyu-1 Hanzi Writing",
@@ -32,8 +34,12 @@ const animationWord = ref("");
 const strokeDataByCharacter = shallowReactive({});
 const pendingStrokeLoads = new Map();
 const strokeAnimationTick = ref(0);
+const animationMountElements = [];
+const animationWriters = new Map();
 
 let strokeAnimationTimer = 0;
+let animationRenderToken = 0;
+let animationLoopTimeout = 0;
 
 onMounted(() => {
   strokeAnimationTimer = window.setInterval(() => {
@@ -51,6 +57,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.clearInterval(strokeAnimationTimer);
   window.removeEventListener("popstate", syncAnimationWordFromUrl);
+  destroyAnimationWriters();
 });
 
 const normalizedRowsPerPage = computed(() =>
@@ -87,12 +94,29 @@ watch(
 
 watch(
   animationWord,
-  (word) => {
+  async (word) => {
+    const renderToken = ++animationRenderToken;
+
+    destroyAnimationWriters();
+    animationMountElements.length = 0;
+
     if (!word) {
       return;
     }
 
-    void preloadStrokeData([word]);
+    await preloadStrokeData([word]);
+
+    if (renderToken !== animationRenderToken) {
+      return;
+    }
+
+    await nextTick();
+
+    if (renderToken !== animationRenderToken) {
+      return;
+    }
+
+    renderAnimationWriters(word);
   },
   { immediate: true },
 );
@@ -214,7 +238,7 @@ function loadStrokeData(character) {
 
       const strokeData = await response.json();
 
-      strokeDataByCharacter[character] = buildCharacterStrokeGuide(strokeData);
+      strokeDataByCharacter[character] = strokeData;
       return strokeDataByCharacter[character];
     })
     .catch(() => {
@@ -406,22 +430,171 @@ function buildFilename(value) {
   return sanitizedValue || "chinese-worksheet";
 }
 
-function buildCharacterStrokeGuide(strokeData) {
-  const strokes = Array.isArray(strokeData?.strokes) ? strokeData.strokes : [];
-
-  return {
-    steps: strokes.map((_, strokeIndex) => strokes.slice(0, strokeIndex + 1)),
-  };
-}
-
 function strokeGuide(word) {
   return Array.from(word).map((character) => {
-    const characterGuide = strokeDataByCharacter[character];
+    const strokes = strokeDataByCharacter[character]?.strokes;
 
     return {
       character,
-      steps: characterGuide?.steps ?? [],
+      steps: Array.isArray(strokes)
+        ? strokes.map((_, strokeIndex) => strokes.slice(0, strokeIndex + 1))
+        : [],
     };
+  });
+}
+
+function setAnimationMountElement(index, element) {
+  if (element) {
+    animationMountElements[index] = element;
+    return;
+  }
+
+  delete animationMountElements[index];
+}
+
+function destroyAnimationWriters() {
+  window.clearTimeout(animationLoopTimeout);
+
+  for (const writer of animationWriters.values()) {
+    if (typeof writer?.destroy === "function") {
+      writer.destroy();
+    }
+  }
+
+  animationWriters.clear();
+}
+
+function renderAnimationWriters(word) {
+  const characterGuides = strokeGuide(word);
+  const writersForWord = [];
+  const renderToken = animationRenderToken;
+
+  for (const [characterIndex, characterGuide] of characterGuides.entries()) {
+    const mountElement = animationMountElements[characterIndex];
+
+    if (!mountElement || !characterGuide.steps.length) {
+      continue;
+    }
+
+    mountElement.replaceChildren();
+
+    const writerSize = Math.max(
+      72,
+      Math.floor(Math.min(mountElement.clientWidth, mountElement.clientHeight) || 84),
+    );
+
+    const writer = HanziWriter.create(mountElement, characterGuide.character, {
+      width: writerSize,
+      height: writerSize,
+      padding: Math.round(writerSize * 0.08),
+      showCharacter: false,
+      showOutline: true,
+      strokeAnimationSpeed: 1.2,
+      delayBetweenStrokes: 180,
+      delayBetweenLoops: 500,
+      outlineColor: "#eadfd6",
+      strokeColor: "#111111",
+      radicalColor: "#b64028",
+      charDataLoader: loadHanziWriterCharData,
+    });
+
+    animationWriters.set(characterIndex, writer);
+    writersForWord.push(writer);
+  }
+
+  if (writersForWord.length) {
+    void Promise.all(writersForWord.map(waitForWriterReady)).then(() => {
+      if (animationRenderToken === renderToken) {
+        startChainedAnimationLoop(renderToken);
+      }
+    });
+  }
+}
+
+function waitForWriterReady(writer) {
+  if (typeof writer?.getCharacterData !== "function") {
+    return Promise.resolve();
+  }
+
+  return writer.getCharacterData().then(() => undefined).catch(() => undefined);
+}
+
+function startChainedAnimationLoop(renderToken) {
+  const writers = Array.from(animationWriters.entries())
+    .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
+    .map(([, writer]) => writer);
+
+  if (!writers.length || renderToken !== animationRenderToken) {
+    return;
+  }
+
+  void animateWriterSequence(writers, 0, renderToken);
+}
+
+async function animateWriterSequence(writers, index, renderToken) {
+  if (renderToken !== animationRenderToken) {
+    return;
+  }
+
+  const writer = writers[index];
+
+  if (!writer) {
+    animationLoopTimeout = window.setTimeout(() => {
+      startChainedAnimationLoop(renderToken);
+    }, wordAnimationLoopDelayMs);
+    return;
+  }
+
+  await awaitHanziWriterAction(writer.hideCharacter({ duration: 0 }));
+
+  if (renderToken !== animationRenderToken) {
+    return;
+  }
+
+  await awaitHanziWriterAction(writer.animateCharacter());
+
+  if (renderToken !== animationRenderToken) {
+    return;
+  }
+
+  await animateWriterSequence(writers, index + 1, renderToken);
+}
+
+async function awaitHanziWriterAction(actionResult) {
+  const firstResult = await actionResult;
+
+  if (firstResult && typeof firstResult.then === "function") {
+    return firstResult;
+  }
+
+  return firstResult;
+}
+
+function loadHanziWriterCharData(character, onLoad, onError) {
+  const cachedData = strokeDataByCharacter[character];
+
+  if (cachedData) {
+    onLoad(cachedData);
+    return cachedData;
+  }
+
+  if (cachedData === null) {
+    const error = new Error(`Unable to load stroke data for ${character}`);
+
+    onError(error);
+    throw error;
+  }
+
+  return loadStrokeData(character).then((loadedData) => {
+    if (!loadedData) {
+      const error = new Error(`Unable to load stroke data for ${character}`);
+
+      onError(error);
+      throw error;
+    }
+
+    onLoad(loadedData);
+    return loadedData;
   });
 }
 
@@ -630,23 +803,14 @@ function strokeAnimationOffset(word, characterIndex) {
                   </p>
                 </div>
 
-                <div class="word-animation-card__canvas" aria-hidden="true">
-                  <svg class="word-animation-card__svg" viewBox="0 0 1024 1024" focusable="false">
-                    <g transform="translate(0 900) scale(1 -1)">
-                      <path
-                        v-for="(strokePath, strokeIndex) in animatedStrokeStep(
-                          animationWord,
-                          characterIndex,
-                          characterGuide.steps,
-                        )"
-                        :key="`animation-${animationWord}-${characterIndex}-${strokeIndex}`"
-                        :d="strokePath"
-                      />
-                    </g>
-                  </svg>
-                  <span v-if="!characterGuide.steps.length" class="word-animation-card__fallback">
-                    {{ characterGuide.character }}
-                  </span>
+                <div
+                  v-if="characterGuide.steps.length"
+                  :ref="(element) => setAnimationMountElement(characterIndex, element)"
+                  class="word-animation-card__canvas word-animation-card__canvas--writer"
+                  aria-hidden="true"
+                ></div>
+                <div v-else class="word-animation-card__canvas" aria-hidden="true">
+                  <span class="word-animation-card__fallback">{{ characterGuide.character }}</span>
                 </div>
               </article>
             </div>
