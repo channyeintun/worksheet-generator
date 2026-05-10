@@ -1,5 +1,8 @@
 <script setup>
 import HanziWriter from "hanzi-writer";
+import { Icon } from "@iconify/vue/offline";
+import googleGmail from "@iconify-icons/logos/google-gmail";
+import telegram from "@iconify-icons/logos/telegram";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowReactive, watch } from "vue";
 import { pinyin } from "pinyin-pro";
 import defaultWordsText from "../words.txt?raw";
@@ -635,9 +638,24 @@ function strokeAnimationOffset(word, characterIndex) {
         <div class="panel-contact" aria-label="Contact information">
           <p class="panel-contact__label">Contact</p>
           <p class="panel-contact__name">Tr. Phoo Pwint Kyaw</p>
-          <a class="panel-contact__link" href="mailto:phoopwintkyaw49@gmail.com">
-            phoopwintkyaw49@gmail.com
-          </a>
+          <div class="panel-contact__links">
+            <a
+              class="panel-contact__link"
+              href="mailto:phoopwintkyaw49@gmail.com"
+              aria-label="Email Tr. Phoo Pwint Kyaw on Gmail"
+            >
+              <Icon :icon="googleGmail" aria-hidden="true" />
+            </a>
+            <a
+              class="panel-contact__link"
+              href="https://t.me/sebby_elgi"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="Open Telegram contact @sebby_elgi"
+            >
+              <Icon :icon="telegram" aria-hidden="true" />
+            </a>
+          </div>
         </div>
       </div>
 

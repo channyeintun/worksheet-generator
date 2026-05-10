@@ -9,6 +9,8 @@
     "preview": "vp preview"
   },
   "dependencies": {
+    "@iconify-icons/logos": "^1.2.36",
+    "@iconify/vue": "^5.0.1",
     "hanzi-writer": "^3.7.3",
     "html2canvas": "^1.4.1",
     "jspdf": "^3.0.3",
