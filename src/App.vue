@@ -1,4 +1,5 @@
 <script setup>
+import { GIFEncoder, applyPalette, quantize } from "gifenc";
 import HanziWriter from "hanzi-writer";
 import { Icon } from "@iconify/vue/offline";
 import googleGmail from "@iconify-icons/logos/google-gmail";
@@ -11,6 +12,23 @@ const strokeDataBaseUrl = "https://cdn.jsdelivr.net/npm/hanzi-writer-data@2.0.1"
 const strokeAnimationIntervalMs = 700;
 const wordAnimationLoopDelayMs = 600;
 const mobileAnimationModalBreakpointPx = 720;
+const animationExportFrameDelayMs = 80;
+const animationExportPaletteSize = 256;
+const animationExportBoxSizeMultiplier = 3;
+const animationExportMinBoxSize = 224;
+const animationExportMaxBoxSize = 320;
+const animationExportPaddingRatio = 0.12;
+const animationExportMinPadding = 18;
+const animationExportMaxPadding = 40;
+const animationExportMaxScale = 2;
+const animationExportVideoBitsPerSecond = 5_000_000;
+const animationVideoFormats = [
+  { mimeType: "video/mp4;codecs=h264", extension: "mp4" },
+  { mimeType: "video/mp4", extension: "mp4" },
+  { mimeType: "video/webm;codecs=vp9", extension: "webm" },
+  { mimeType: "video/webm;codecs=vp8", extension: "webm" },
+  { mimeType: "video/webm", extension: "webm" },
+];
 
 const defaults = {
   title: "Hanyu-1 Hanzi Writing",
@@ -32,13 +50,18 @@ const showPinyin = ref(defaults.showPinyin);
 const selectedWordsText = ref(defaultWords.join("\n"));
 const wordSearch = ref("");
 const previewRef = ref(null);
+const animationPreviewRef = ref(null);
 const isExportingPdf = ref(false);
 const exportError = ref("");
+const isExportingAnimationGif = ref(false);
+const isExportingAnimationVideo = ref(false);
+const animationExportError = ref("");
 const animationWord = ref("");
 const urlDrivenAnimationWord = ref("");
 const isMobileViewport = ref(false);
 const isAnimationModalVisible = ref(false);
 const dismissedAnimationModalWord = ref("");
+const supportedAnimationVideoFormat = ref(null);
 const strokeDataByCharacter = shallowReactive({});
 const pendingStrokeLoads = new Map();
 const strokeAnimationTick = ref(0);
@@ -53,6 +76,7 @@ let mobileViewportQuery = null;
 onMounted(() => {
   mobileViewportQuery = window.matchMedia(`(max-width: ${mobileAnimationModalBreakpointPx}px)`);
   syncMobileViewport(mobileViewportQuery);
+  supportedAnimationVideoFormat.value = getSupportedAnimationVideoFormat();
 
   strokeAnimationTimer = window.setInterval(() => {
     if (isExportingPdf.value) {
@@ -103,6 +127,31 @@ const animationStrokeGuide = computed(() => strokeGuide(animationWord.value));
 const shouldAutoShowAnimationModal = computed(
   () => isMobileViewport.value && Boolean(animationWord.value) && Boolean(urlDrivenAnimationWord.value),
 );
+const isExportingAnimation = computed(
+  () => isExportingAnimationGif.value || isExportingAnimationVideo.value,
+);
+const animationVideoExportLabel = computed(() => {
+  if (!supportedAnimationVideoFormat.value) {
+    return "Video";
+  }
+
+  return supportedAnimationVideoFormat.value.extension.toUpperCase();
+});
+const animationVideoSupportCopy = computed(() => {
+  if (!animationWord.value) {
+    return "";
+  }
+
+  if (!supportedAnimationVideoFormat.value) {
+    return "Video export is unavailable in this browser. GIF export is still available.";
+  }
+
+  if (supportedAnimationVideoFormat.value.extension !== "mp4") {
+    return `This browser exports video as ${supportedAnimationVideoFormat.value.extension.toUpperCase()}.`;
+  }
+
+  return "";
+});
 
 watch(
   selectedWords,
@@ -214,6 +263,7 @@ function updateAnimationWord(value) {
   const [nextWord = ""] = parseWords(value);
   const url = new URL(window.location.href);
 
+  animationExportError.value = "";
   urlDrivenAnimationWord.value = "";
   dismissedAnimationModalWord.value = "";
 
@@ -232,6 +282,10 @@ function clearAnimationWord() {
 }
 
 function closeAnimationModal() {
+  if (isExportingAnimation.value) {
+    return;
+  }
+
   dismissedAnimationModalWord.value = urlDrivenAnimationWord.value;
   isAnimationModalVisible.value = false;
 }
@@ -397,6 +451,459 @@ async function downloadPdf() {
   }
 }
 
+async function downloadAnimationGif() {
+  if (!animationWord.value || isExportingAnimation.value || isExportingPdf.value) {
+    return;
+  }
+
+  isExportingAnimationGif.value = true;
+  animationExportError.value = "";
+
+  try {
+    const gif = GIFEncoder();
+    const { word } = await captureAnimationSequence((snapshotCanvas, frameIndex) => {
+      const snapshotContext = snapshotCanvas.getContext("2d", { willReadFrequently: true });
+
+      if (!snapshotContext) {
+        throw new Error("Unable to read the animation export canvas");
+      }
+
+      const { data } = snapshotContext.getImageData(0, 0, snapshotCanvas.width, snapshotCanvas.height);
+      const palette = quantize(data, animationExportPaletteSize);
+      const indexedFrame = applyPalette(data, palette);
+
+      gif.writeFrame(indexedFrame, snapshotCanvas.width, snapshotCanvas.height, {
+        palette,
+        delay: animationExportFrameDelayMs,
+        ...(frameIndex === 0 ? { repeat: 0 } : {}),
+      });
+    });
+
+    gif.finish();
+
+    downloadBlob(
+      new Blob([gif.bytes()], { type: "image/gif" }),
+      buildAnimationExportFilename(word, "gif"),
+    );
+  } catch (error) {
+    console.error("Unable to export animation GIF", error);
+    animationExportError.value = "Unable to export the animation as a GIF. Please try again.";
+  } finally {
+    isExportingAnimationGif.value = false;
+  }
+}
+
+async function downloadAnimationVideo() {
+  if (
+    !animationWord.value ||
+    !supportedAnimationVideoFormat.value ||
+    isExportingAnimation.value ||
+    isExportingPdf.value
+  ) {
+    return;
+  }
+
+  isExportingAnimationVideo.value = true;
+  animationExportError.value = "";
+
+  let recording = null;
+
+  try {
+    const captureCanvas = document.createElement("canvas");
+    let captureContext = null;
+
+    const { word } = await captureAnimationSequence(async (snapshotCanvas) => {
+      if (!captureContext) {
+        captureCanvas.width = snapshotCanvas.width;
+        captureCanvas.height = snapshotCanvas.height;
+        captureContext = captureCanvas.getContext("2d");
+
+        if (!captureContext) {
+          throw new Error("Unable to start the animation recorder");
+        }
+
+        recording = createAnimationRecorder(captureCanvas, supportedAnimationVideoFormat.value);
+      }
+
+      captureContext.clearRect(0, 0, captureCanvas.width, captureCanvas.height);
+      captureContext.drawImage(snapshotCanvas, 0, 0);
+    });
+
+    if (!recording) {
+      throw new Error("Animation recorder did not start");
+    }
+
+    const animationVideoBlob = await recording.stop();
+
+    downloadBlob(
+      animationVideoBlob,
+      buildAnimationExportFilename(word, supportedAnimationVideoFormat.value.extension),
+    );
+  } catch (error) {
+    console.error("Unable to export animation video", error);
+    animationExportError.value = `Unable to export the animation as ${animationVideoExportLabel.value}. Please try again.`;
+
+    if (recording) {
+      recording.cancel();
+    }
+  } finally {
+    isExportingAnimationVideo.value = false;
+  }
+}
+
+async function captureAnimationSequence(onFrame) {
+  const word = animationWord.value;
+
+  if (!word) {
+    throw new Error("Select a word before exporting the animation");
+  }
+
+  const exportScene = await createAnimationExportScene(word);
+  let frameCount = 0;
+
+  try {
+    exportScene.renderFrame();
+    await onFrame(exportScene.canvas, frameCount);
+    frameCount += 1;
+
+    const maxFrames = Math.max(
+      2,
+      Math.ceil(calculateAnimationExportDuration(word) / animationExportFrameDelayMs) + 4,
+    );
+    let animationCompleted = false;
+    let animationError = null;
+    const animationPromise = exportScene
+      .startAnimation()
+      .catch((error) => {
+        animationError = error;
+      })
+      .finally(() => {
+        animationCompleted = true;
+      });
+
+    while (!animationCompleted && frameCount < maxFrames) {
+      await wait(animationExportFrameDelayMs);
+      exportScene.renderFrame();
+      await onFrame(exportScene.canvas, frameCount);
+      frameCount += 1;
+    }
+
+    await animationPromise;
+
+    if (animationError) {
+      throw animationError;
+    }
+
+    for (let settleFrameIndex = 0; settleFrameIndex < 2; settleFrameIndex += 1) {
+      await wait(animationExportFrameDelayMs);
+      exportScene.renderFrame();
+      await onFrame(exportScene.canvas, frameCount);
+      frameCount += 1;
+    }
+  } finally {
+    exportScene.cleanup();
+  }
+
+  return { frameCount, word };
+}
+
+async function createAnimationExportScene(word) {
+  await preloadStrokeData([word]);
+
+  const renderableCharacters = strokeGuide(word).filter((characterGuide) => characterGuide.steps.length);
+
+  if (!renderableCharacters.length) {
+    throw new Error(`No stroke data is available for ${word}`);
+  }
+
+  const previewBoxSize = getAnimationPreviewBoxSize();
+  const boxSize = getAnimationExportBoxSize(previewBoxSize);
+  const gap = getAnimationExportGap(previewBoxSize, boxSize);
+  const padding = getAnimationExportPadding(boxSize);
+  const scale = Math.min(window.devicePixelRatio || 1, animationExportMaxScale);
+  const totalWidth = boxSize * renderableCharacters.length + gap * Math.max(0, renderableCharacters.length - 1);
+  const exportRoot = document.createElement("div");
+  const mounts = [];
+
+  exportRoot.style.position = "fixed";
+  exportRoot.style.left = "-10000px";
+  exportRoot.style.top = "0";
+  exportRoot.style.display = "flex";
+  exportRoot.style.gap = `${gap}px`;
+  exportRoot.style.pointerEvents = "none";
+  exportRoot.style.opacity = "0";
+  document.body.appendChild(exportRoot);
+
+  for (const characterGuide of renderableCharacters) {
+    const mountElement = document.createElement("div");
+
+    mountElement.style.width = `${boxSize}px`;
+    mountElement.style.height = `${boxSize}px`;
+    exportRoot.appendChild(mountElement);
+    mounts.push({ character: characterGuide.character, mountElement });
+  }
+
+  const writers = mounts.map(({ character, mountElement }) => {
+    mountElement.replaceChildren();
+    return HanziWriter.create(mountElement, character, getAnimationWriterOptions(boxSize, "canvas"));
+  });
+  const exportCanvas = document.createElement("canvas");
+  exportCanvas.width = Math.max(1, Math.round((totalWidth + padding * 2) * scale));
+  exportCanvas.height = Math.max(1, Math.round((boxSize + padding * 2) * scale));
+
+  await Promise.all(writers.map(waitForWriterReady));
+  await Promise.all(writers.map((writer) => awaitHanziWriterAction(writer.hideCharacter({ duration: 0 }))));
+  await waitForAnimationFrame();
+
+  return {
+    canvas: exportCanvas,
+    cleanup() {
+      for (const writer of writers) {
+        if (typeof writer?.destroy === "function") {
+          writer.destroy();
+        }
+      }
+
+      exportRoot.remove();
+    },
+    renderFrame() {
+      drawAnimationExportFrame(exportCanvas, mounts, boxSize, gap, padding, scale);
+    },
+    startAnimation() {
+      return animateExportWriterSequence(writers, 0);
+    },
+  };
+}
+
+function getAnimationPreviewBoxSize() {
+  const mountedSizes = animationMountElements
+    .filter((element) => element instanceof HTMLElement)
+    .map((element) => Math.floor(Math.min(element.clientWidth, element.clientHeight) || 0))
+    .filter(Boolean);
+
+  if (mountedSizes.length) {
+    return Math.max(72, mountedSizes[0]);
+  }
+
+  return 84;
+}
+
+function getAnimationExportBoxSize(previewBoxSize) {
+  const scaledBoxSize = Math.round(previewBoxSize * animationExportBoxSizeMultiplier);
+
+  return Math.min(Math.max(scaledBoxSize, animationExportMinBoxSize), animationExportMaxBoxSize);
+}
+
+function getAnimationExportGap(previewBoxSize, exportBoxSize) {
+  const previewBody = animationPreviewRef.value?.querySelector(".word-animation-panel__body");
+  const sizeRatio = exportBoxSize / Math.max(previewBoxSize, 1);
+
+  if (previewBody) {
+    const computedGap = Number.parseFloat(window.getComputedStyle(previewBody).columnGap);
+
+    if (Number.isFinite(computedGap)) {
+      return Math.max(10, Math.round(computedGap * sizeRatio));
+    }
+  }
+
+  return Math.max(10, Math.round(10 * sizeRatio));
+}
+
+function getAnimationExportPadding(boxSize) {
+  const scaledPadding = Math.round(boxSize * animationExportPaddingRatio);
+
+  return Math.min(Math.max(scaledPadding, animationExportMinPadding), animationExportMaxPadding);
+}
+
+function drawAnimationExportFrame(canvas, mounts, boxSize, gap, padding, scale) {
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Unable to draw the animation export");
+  }
+
+  const totalWidth = boxSize * mounts.length + gap * Math.max(0, mounts.length - 1);
+  const totalHeight = boxSize + padding * 2;
+
+  context.setTransform(scale, 0, 0, scale, 0, 0);
+  context.clearRect(0, 0, totalWidth + padding * 2, totalHeight);
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, totalWidth + padding * 2, totalHeight);
+
+  mounts.forEach(({ mountElement }, mountIndex) => {
+    const x = padding + mountIndex * (boxSize + gap);
+    const y = padding;
+    const writerCanvas = mountElement.querySelector("canvas");
+
+    drawAnimationExportBox(context, x, y, boxSize);
+
+    if (writerCanvas instanceof HTMLCanvasElement) {
+      context.drawImage(writerCanvas, x, y, boxSize, boxSize);
+    }
+  });
+}
+
+function drawAnimationExportBox(context, x, y, size) {
+  context.save();
+  context.beginPath();
+  drawRoundedRectPath(context, x, y, size, size, 12);
+  context.clip();
+  context.fillStyle = "#fffdfa";
+  context.fillRect(x, y, size, size);
+  context.strokeStyle = "rgba(239, 102, 89, 0.18)";
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(x + size / 2, y);
+  context.lineTo(x + size / 2, y + size);
+  context.moveTo(x, y + size / 2);
+  context.lineTo(x + size, y + size / 2);
+  context.stroke();
+  context.restore();
+
+  context.beginPath();
+  drawRoundedRectPath(context, x + 0.5, y + 0.5, size - 1, size - 1, 12);
+  context.strokeStyle = "rgba(239, 102, 89, 0.45)";
+  context.lineWidth = 1;
+  context.stroke();
+}
+
+function drawRoundedRectPath(context, x, y, width, height, radius) {
+  const boundedRadius = Math.min(radius, width / 2, height / 2);
+
+  context.moveTo(x + boundedRadius, y);
+  context.arcTo(x + width, y, x + width, y + height, boundedRadius);
+  context.arcTo(x + width, y + height, x, y + height, boundedRadius);
+  context.arcTo(x, y + height, x, y, boundedRadius);
+  context.arcTo(x, y, x + width, y, boundedRadius);
+  context.closePath();
+}
+
+function animateExportWriterSequence(writers, index) {
+  const writer = writers[index];
+
+  if (!writer) {
+    return wait(wordAnimationLoopDelayMs);
+  }
+
+  return awaitHanziWriterAction(writer.animateCharacter()).then(() => {
+    return animateExportWriterSequence(writers, index + 1);
+  });
+}
+
+function calculateAnimationExportDuration(word) {
+  const characterGuides = strokeGuide(word);
+  const totalStrokes = characterGuides.reduce((strokeCount, characterGuide) => {
+    return strokeCount + characterGuide.steps.length;
+  }, 0);
+  const estimatedDuration = totalStrokes * 240 + characterGuides.length * 520 + wordAnimationLoopDelayMs;
+
+  return Math.min(Math.max(estimatedDuration, 2_600), 8_200);
+}
+
+function getSupportedAnimationVideoFormat() {
+  if (typeof window === "undefined" || typeof MediaRecorder === "undefined") {
+    return null;
+  }
+
+  if (typeof MediaRecorder.isTypeSupported !== "function") {
+    return animationVideoFormats[1];
+  }
+
+  for (const format of animationVideoFormats) {
+    if (MediaRecorder.isTypeSupported(format.mimeType)) {
+      return format;
+    }
+  }
+
+  return null;
+}
+
+function createAnimationRecorder(canvas, format) {
+  const stream = canvas.captureStream(Math.round(1000 / animationExportFrameDelayMs));
+  const mediaRecorder = new MediaRecorder(stream, {
+    mimeType: format.mimeType,
+    videoBitsPerSecond: animationExportVideoBitsPerSecond,
+  });
+  const chunks = [];
+
+  const animationVideoBlob = new Promise((resolve, reject) => {
+    mediaRecorder.addEventListener("dataavailable", (event) => {
+      if (event.data.size) {
+        chunks.push(event.data);
+      }
+    });
+
+    mediaRecorder.addEventListener(
+      "stop",
+      () => {
+        stream.getTracks().forEach((track) => track.stop());
+        resolve(new Blob(chunks, { type: format.mimeType }));
+      },
+      { once: true },
+    );
+
+    mediaRecorder.addEventListener(
+      "error",
+      (event) => {
+        stream.getTracks().forEach((track) => track.stop());
+        reject(event.error ?? new Error("Unable to record the animation"));
+      },
+      { once: true },
+    );
+  });
+
+  mediaRecorder.start();
+
+  return {
+    cancel() {
+      if (mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+        return;
+      }
+
+      stream.getTracks().forEach((track) => track.stop());
+    },
+    stop() {
+      if (mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+      }
+
+      return animationVideoBlob;
+    },
+  };
+}
+
+function buildAnimationExportFilename(word, extension) {
+  return `${buildFilename(word)}-stroke-order.${extension}`;
+}
+
+function downloadBlob(blob, filename) {
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 0);
+}
+
+function waitForAnimationFrame() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
+function wait(durationMs) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, durationMs);
+  });
+}
+
 function practiceVariant(index) {
   if (index === 0) {
     return "practice-cell--model";
@@ -544,20 +1051,11 @@ function renderAnimationWriters(word) {
       Math.floor(Math.min(mountElement.clientWidth, mountElement.clientHeight) || 84),
     );
 
-    const writer = HanziWriter.create(mountElement, characterGuide.character, {
-      width: writerSize,
-      height: writerSize,
-      padding: Math.round(writerSize * 0.08),
-      showCharacter: false,
-      showOutline: true,
-      strokeAnimationSpeed: 1.2,
-      delayBetweenStrokes: 180,
-      delayBetweenLoops: 500,
-      outlineColor: "#eadfd6",
-      strokeColor: "#111111",
-      radicalColor: "#b64028",
-      charDataLoader: loadHanziWriterCharData,
-    });
+    const writer = HanziWriter.create(
+      mountElement,
+      characterGuide.character,
+      getAnimationWriterOptions(writerSize, "svg"),
+    );
 
     animationWriters.set(characterIndex, writer);
     writersForWord.push(writer);
@@ -570,6 +1068,24 @@ function renderAnimationWriters(word) {
       }
     });
   }
+}
+
+function getAnimationWriterOptions(writerSize, renderer) {
+  return {
+    width: writerSize,
+    height: writerSize,
+    padding: Math.round(writerSize * 0.08),
+    showCharacter: false,
+    showOutline: true,
+    strokeAnimationSpeed: 1.2,
+    delayBetweenStrokes: 180,
+    delayBetweenLoops: 500,
+    outlineColor: "#eadfd6",
+    strokeColor: "#111111",
+    radicalColor: "#b64028",
+    renderer,
+    charDataLoader: loadHanziWriterCharData,
+  };
 }
 
 function waitForWriterReady(writer) {
@@ -844,15 +1360,25 @@ function strokeAnimationOffset(word, characterIndex) {
         :role="isAnimationModalVisible ? 'dialog' : undefined"
       >
         <div class="word-animation-panel__header">
-          <div>
+          <div class="word-animation-panel__meta">
             <p class="toolbar-kicker">Word animation</p>
             <p class="word-animation-panel__copy">
-              Type a word here or open the page with a `word` URL parameter to preview stroke order.
+              Type a word here or open the page with a `word` URL parameter to preview stroke order and export it.
+            </p>
+            <p
+              v-if="animationExportError"
+              class="word-animation-panel__status word-animation-panel__status--error"
+            >
+              {{ animationExportError }}
+            </p>
+            <p v-else-if="animationVideoSupportCopy" class="word-animation-panel__status">
+              {{ animationVideoSupportCopy }}
             </p>
           </div>
           <div class="word-animation-panel__controls">
             <input
               class="text-input word-animation-panel__input"
+              :disabled="isExportingAnimation"
               type="text"
               :value="animationWord"
               placeholder="Enter a word to animate"
@@ -862,6 +1388,29 @@ function strokeAnimationOffset(word, characterIndex) {
               v-if="animationWord"
               type="button"
               class="secondary-button"
+              :disabled="isExportingAnimation || isExportingPdf"
+              @click="downloadAnimationGif"
+            >
+              {{ isExportingAnimationGif ? "Preparing GIF..." : "Download GIF" }}
+            </button>
+            <button
+              v-if="animationWord"
+              type="button"
+              class="secondary-button"
+              :disabled="!supportedAnimationVideoFormat || isExportingAnimation || isExportingPdf"
+              @click="downloadAnimationVideo"
+            >
+              {{
+                isExportingAnimationVideo
+                  ? `Preparing ${animationVideoExportLabel}...`
+                  : `Download ${animationVideoExportLabel}`
+              }}
+            </button>
+            <button
+              v-if="animationWord"
+              type="button"
+              class="secondary-button"
+              :disabled="isExportingAnimation"
               @click="clearAnimationWord"
             >
               Clear
@@ -870,6 +1419,7 @@ function strokeAnimationOffset(word, characterIndex) {
               v-if="isAnimationModalVisible"
               type="button"
               class="secondary-button"
+              :disabled="isExportingAnimation"
               @click="closeAnimationModal"
             >
               Close
@@ -877,7 +1427,11 @@ function strokeAnimationOffset(word, characterIndex) {
           </div>
         </div>
 
-        <div class="word-animation-panel__preview" :class="{ 'is-empty': !animationWord }">
+        <div
+          ref="animationPreviewRef"
+          class="word-animation-panel__preview"
+          :class="{ 'is-empty': !animationWord }"
+        >
           <template v-if="animationWord">
             <div class="word-animation-panel__summary">
               <h2 class="word-animation-panel__word">{{ animationWord }}</h2>
